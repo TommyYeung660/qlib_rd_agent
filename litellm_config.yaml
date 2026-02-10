@@ -1,0 +1,69 @@
+# LiteLLM Configuration for qlib_rd_agent
+# Maps OpenAI-compatible model names to actual backends
+#
+# RD-Agent expects OpenAI-style model names.
+# LiteLLM translates these to the actual provider APIs.
+#
+# Chat:      Volcengine (火山引擎) glm-4.7
+# Embedding: AIHUBMIX text-embedding-3-small
+#   (Volcengine does not support embedding endpoints)
+#
+# Usage: Set LITELLM_CONFIG_PATH=litellm_config.yaml in .env
+
+model_list:
+  # ── Chat models: Volcengine glm-4.7 ──────────────────────────────
+  # RD-Agent calls "gpt-4o" or similar → routed to Volcengine glm-4.7
+  - model_name: "gpt-4o"
+    litellm_params:
+      model: "openai/glm-4.7"
+      api_key: "os.environ/VOLCENGINE_API_KEY"
+      api_base: "os.environ/VOLCENGINE_BASE_URL"
+      drop_params: true  # Drop unsupported OpenAI params
+
+  - model_name: "gpt-4o-mini"
+    litellm_params:
+      model: "openai/glm-4.7"
+      api_key: "os.environ/VOLCENGINE_API_KEY"
+      api_base: "os.environ/VOLCENGINE_BASE_URL"
+      drop_params: true
+
+  - model_name: "gpt-4"
+    litellm_params:
+      model: "openai/glm-4.7"
+      api_key: "os.environ/VOLCENGINE_API_KEY"
+      api_base: "os.environ/VOLCENGINE_BASE_URL"
+      drop_params: true
+
+  - model_name: "gpt-3.5-turbo"
+    litellm_params:
+      model: "openai/glm-4.7"
+      api_key: "os.environ/VOLCENGINE_API_KEY"
+      api_base: "os.environ/VOLCENGINE_BASE_URL"
+      drop_params: true
+
+  # ── Embedding models: AIHUBMIX text-embedding-3-small ─────────────
+  # RD-Agent calls "text-embedding-3-small" or similar → routed to AIHUBMIX
+  - model_name: "text-embedding-3-small"
+    litellm_params:
+      model: "openai/text-embedding-3-small"
+      api_key: "os.environ/AIHUBMIX_API_KEY"
+      api_base: "os.environ/AIHUBMIX_BASE_URL"
+
+  - model_name: "text-embedding-3-large"
+    litellm_params:
+      model: "openai/text-embedding-3-small"
+      api_key: "os.environ/AIHUBMIX_API_KEY"
+      api_base: "os.environ/AIHUBMIX_BASE_URL"
+
+  - model_name: "text-embedding-ada-002"
+    litellm_params:
+      model: "openai/text-embedding-3-small"
+      api_key: "os.environ/AIHUBMIX_API_KEY"
+      api_base: "os.environ/AIHUBMIX_BASE_URL"
+
+# General settings
+litellm_settings:
+  drop_params: true  # Silently drop unsupported params
+  set_verbose: false
+  num_retries: 3
+  request_timeout: 120
