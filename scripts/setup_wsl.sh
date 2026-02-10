@@ -9,6 +9,7 @@ set -euo pipefail
 #    - System packages
 #    - Miniforge (conda-forge)
 #    - CUDA Toolkit 12.1 (toolkit only; WSL2 uses Windows GPU driver)
+#    - Docker Engine + NVIDIA Container Toolkit (for RD-Agent code sandboxing)
 #    - uv (Python package manager)
 #    - rdagent4qlib conda environment (Python 3.10, RD-Agent, Qlib, PyTorch)
 #    - qlib_rd_agent project setup
@@ -29,13 +30,13 @@ set -euo pipefail
 PROJECT_DIR="$HOME/qlib_rd_agent"
 
 # ---------------------------------------------------------------------------
-echo "=== [1/7] Updating system packages ==="
+echo "=== [1/8] Updating system packages ==="
 # ---------------------------------------------------------------------------
 sudo apt-get update && sudo apt-get upgrade -y
 sudo apt-get install -y build-essential git curl wget unzip software-properties-common
 
 # ---------------------------------------------------------------------------
-echo "=== [2/7] Installing Miniforge ==="
+echo "=== [2/8] Installing Miniforge ==="
 # ---------------------------------------------------------------------------
 # Using Miniforge (conda-forge default channel), NOT Anaconda or Miniconda.
 if ! command -v conda &> /dev/null; then
@@ -60,7 +61,7 @@ fi
 echo "Verification: conda $(conda --version 2>&1 || echo 'not yet on PATH — restart shell')"
 
 # ---------------------------------------------------------------------------
-echo "=== [3/7] Installing CUDA Toolkit ==="
+echo "=== [3/8] Installing CUDA Toolkit ==="
 # ---------------------------------------------------------------------------
 # WSL2 uses the Windows GPU driver — only the CUDA toolkit is needed inside WSL.
 # Installing CUDA 12.1, compatible with PyTorch 2.x.
@@ -91,7 +92,68 @@ echo "Verification: nvidia-smi"
 nvidia-smi || echo "WARNING: nvidia-smi failed. Ensure Windows NVIDIA driver is installed."
 
 # ---------------------------------------------------------------------------
-echo "=== [4/7] Installing uv ==="
+echo "=== [4/8] Installing Docker Engine ==="
+# ---------------------------------------------------------------------------
+# RD-Agent uses Docker to sandbox AI-generated code execution.
+# This installs Docker CE (not Docker Desktop) inside WSL2.
+if ! command -v docker &> /dev/null; then
+    # Remove any conflicting packages
+    for pkg in docker.io docker-doc docker-compose podman-docker containerd runc; do
+        sudo apt-get remove -y "$pkg" 2>/dev/null || true
+    done
+
+    # Add Docker's official GPG key
+    sudo install -m 0755 -d /etc/apt/keyrings
+    curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    sudo chmod a+r /etc/apt/keyrings/docker.gpg
+
+    # Set up the repository
+    echo \
+      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+      $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+      sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+    sudo apt-get update
+    sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+    # Allow current user to use Docker without sudo
+    sudo usermod -aG docker "$USER"
+    echo "Added $USER to docker group. You may need to restart WSL for group change to take effect."
+else
+    echo "Docker already installed: $(docker --version)"
+fi
+
+# Start Docker daemon if not running (WSL2 may not have systemd)
+if ! pgrep -x dockerd > /dev/null; then
+    echo "Starting Docker daemon..."
+    sudo dockerd &>/dev/null &
+    sleep 3
+fi
+
+echo "Verification: docker version"
+docker version 2>/dev/null || echo "WARNING: Docker daemon not responding. Try: sudo service docker start"
+
+# Install NVIDIA Container Toolkit (for GPU pass-through to Docker)
+if ! dpkg -l nvidia-container-toolkit &> /dev/null 2>&1; then
+    echo "Installing NVIDIA Container Toolkit..."
+    curl -fsSL https://nvidia.github.io/libnvidia-container/gpgkey | sudo gpg --dearmor -o /usr/share/keyrings/nvidia-container-toolkit-keyring.gpg
+    curl -s -L "https://nvidia.github.io/libnvidia-container/stable/deb/nvidia-container-toolkit.list" | \
+        sed 's#deb https://#deb [signed-by=/usr/share/keyrings/nvidia-container-toolkit-keyring.gpg] https://#g' | \
+        sudo tee /etc/apt/sources.list.d/nvidia-container-toolkit.list > /dev/null
+    sudo apt-get update
+    sudo apt-get install -y nvidia-container-toolkit
+    sudo nvidia-ctk runtime configure --runtime=docker
+    # Restart Docker to pick up nvidia runtime
+    sudo pkill dockerd 2>/dev/null || true
+    sleep 2
+    sudo dockerd &>/dev/null &
+    sleep 3
+else
+    echo "NVIDIA Container Toolkit already installed"
+fi
+
+# ---------------------------------------------------------------------------
+echo "=== [5/8] Installing uv ==="
 # ---------------------------------------------------------------------------
 if ! command -v uv &> /dev/null; then
     curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -108,7 +170,7 @@ fi
 echo "Verification: uv $(uv --version 2>&1)"
 
 # ---------------------------------------------------------------------------
-echo "=== [5/7] Creating rdagent4qlib conda environment ==="
+echo "=== [6/8] Creating rdagent4qlib conda environment ==="
 # ---------------------------------------------------------------------------
 source "$HOME/miniforge3/etc/profile.d/conda.sh"
 
@@ -141,7 +203,7 @@ source "$HOME/.bashrc" 2>/dev/null || true
 export PATH="$HOME/.local/bin:$HOME/miniforge3/bin:/usr/local/cuda-12.1/bin:$PATH"
 
 # ---------------------------------------------------------------------------
-echo "=== [6/7] Setting up qlib_rd_agent project ==="
+echo "=== [7/8] Setting up qlib_rd_agent project ==="
 # ---------------------------------------------------------------------------
 if [ ! -d "$PROJECT_DIR" ]; then
     echo "Please clone or copy qlib_rd_agent to $PROJECT_DIR first."
@@ -160,7 +222,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-echo "=== [7/7] Environment configuration ==="
+echo "=== [8/8] Environment configuration ==="
 # ---------------------------------------------------------------------------
 if [ -f "$PROJECT_DIR/.env.example" ] && [ ! -f "$PROJECT_DIR/.env" ]; then
     cp "$PROJECT_DIR/.env.example" "$PROJECT_DIR/.env"
@@ -180,9 +242,12 @@ echo "Next steps:"
 echo "  1. Restart your shell:  source ~/.bashrc"
 echo "  2. Edit $PROJECT_DIR/.env with your API keys:"
 echo "       VOLCENGINE_API_KEY=<your-volcengine-key>"
-echo "       AIHUBMIX_API_KEY=<your-aihubmix-key>"
+echo "       LITELLM_PROXY_API_KEY=<your-aihubmix-key>"
+echo "       OPENAI_API_KEY=<same-as-volcengine-key>"
 echo "  3. Ensure Windows NVIDIA driver is installed (not inside WSL)"
 echo "  4. Verify GPU:  nvidia-smi"
-echo "  5. Run:"
+echo "  5. Verify Docker:  docker run --rm --gpus all nvidia/cuda:12.1.1-base-ubuntu22.04 nvidia-smi"
+echo "  6. Health check:  conda run -n rdagent4qlib rdagent health_check"
+echo "  7. Run:"
 echo "       cd $PROJECT_DIR && source .venv/bin/activate && python -m src.main full"
 echo ""

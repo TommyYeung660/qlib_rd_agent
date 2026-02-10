@@ -26,14 +26,16 @@ class LLMConfig:
     """Configuration for LLM providers (Volcengine + AIHUBMIX).
 
     Chat inference uses Volcengine (火山引擎) with ``glm-4.7``.
-    Embeddings use AIHUBMIX with ``text-embedding-3-small`` because
-    Volcengine does not support embedding endpoints.
+    Embeddings use AIHUBMIX with ``text-embedding-3-small``, routed via
+    LiteLLM's ``litellm_proxy/`` prefix mechanism — the actual provider
+    key and base URL are passed as ``LITELLM_PROXY_API_KEY`` and
+    ``LITELLM_PROXY_API_BASE`` environment variables.
     """
 
     chat_model: str = "volcengine/glm-4.7"
-    embedding_model: str = "aihubmix/text-embedding-3-small"
+    embedding_model: str = "litellm_proxy/text-embedding-3-small"
     volcengine_api_key: str = ""
-    volcengine_base_url: str = "https://ark.cn-beijing.volces.com/api/coding/v3"
+    volcengine_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
     aihubmix_api_key: str = ""
     aihubmix_base_url: str = "https://aihubmix.com/v1"
     litellm_config_path: str = "litellm_config.yaml"
@@ -77,9 +79,9 @@ def load_config() -> AppConfig:
     - DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN
     - DROPBOX_REMOTE_SHARED_FOLDER, DROPBOX_REMOTE_RDAGENT_FOLDER
     - DROPBOX_LOCAL_DOWNLOAD_DIR, DROPBOX_LOCAL_FACTORS_DIR
-    - VOLCENGINE_API_KEY, VOLCENGINE_BASE_URL
-    - AIHUBMIX_API_KEY, AIHUBMIX_BASE_URL
-    - CHAT_MODEL, EMBEDDING_MODEL
+    - VOLCENGINE_API_KEY, VOLCENGINE_API_BASE
+    - LITELLM_PROXY_API_KEY (or AIHUBMIX_API_KEY), LITELLM_PROXY_API_BASE (or AIHUBMIX_BASE_URL)
+    - CHAT_MODEL, EMBEDDING_MODEL, BACKEND
     - LITELLM_CONFIG_PATH
     - MAX_CONCURRENT_REQUESTS, REQUEST_TIMEOUT
     - RDAGENT_SOURCE, CONDA_ENV_NAME
@@ -111,14 +113,21 @@ def load_config() -> AppConfig:
     # Build LLMConfig
     llm = LLMConfig(
         chat_model=os.getenv("CHAT_MODEL", "volcengine/glm-4.7"),
-        embedding_model=os.getenv("EMBEDDING_MODEL", "aihubmix/text-embedding-3-small"),
+        embedding_model=os.getenv(
+            "EMBEDDING_MODEL", "litellm_proxy/text-embedding-3-small"
+        ),
         volcengine_api_key=os.getenv("VOLCENGINE_API_KEY", ""),
         volcengine_base_url=os.getenv(
-            "VOLCENGINE_BASE_URL",
-            "https://ark.cn-beijing.volces.com/api/coding/v3",
+            "VOLCENGINE_API_BASE",
+            "https://ark.cn-beijing.volces.com/api/v3",
         ),
-        aihubmix_api_key=os.getenv("AIHUBMIX_API_KEY", ""),
-        aihubmix_base_url=os.getenv("AIHUBMIX_BASE_URL", "https://aihubmix.com/v1"),
+        aihubmix_api_key=os.getenv(
+            "LITELLM_PROXY_API_KEY", os.getenv("AIHUBMIX_API_KEY", "")
+        ),
+        aihubmix_base_url=os.getenv(
+            "LITELLM_PROXY_API_BASE",
+            os.getenv("AIHUBMIX_BASE_URL", "https://aihubmix.com/v1"),
+        ),
         litellm_config_path=os.getenv("LITELLM_CONFIG_PATH", "litellm_config.yaml"),
         max_concurrent_requests=int(os.getenv("MAX_CONCURRENT_REQUESTS", "3")),
         request_timeout=int(os.getenv("REQUEST_TIMEOUT", "120")),

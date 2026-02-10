@@ -70,15 +70,18 @@ def _build_rdagent_env(config: AppConfig) -> Dict[str, str]:
     specific settings derived from *config*.
 
     Environment variables set:
+        - ``BACKEND``                 – ``"rdagent.oai.backend.LiteLLMAPIBackend"``
         - ``CHAT_MODEL``              – e.g. ``"volcengine/glm-4.7"``
-        - ``EMBEDDING_MODEL``         – e.g. ``"aihubmix/text-embedding-3-small"``
+        - ``EMBEDDING_MODEL``         – e.g. ``"litellm_proxy/text-embedding-3-small"``
         - ``VOLCENGINE_API_KEY``      – API key for Volcengine (火山引擎)
-        - ``VOLCENGINE_BASE_URL``     – e.g. ``"https://ark.cn-beijing.volces.com/api/coding/v3"``
-        - ``AIHUBMIX_API_KEY``        – API key for AIHUBMIX (embedding provider)
-        - ``AIHUBMIX_BASE_URL``       – e.g. ``"https://aihubmix.com/v1"``
-        - ``USE_CHAT_BACKEND``        – ``"rdagent.oai.backend.LiteLLMAPIBackend"``
+        - ``VOLCENGINE_API_BASE``     – e.g. ``"https://ark.cn-beijing.volces.com/api/v3"``
+        - ``LITELLM_PROXY_API_KEY``   – API key for the embedding provider (AIHUBMIX)
+        - ``LITELLM_PROXY_API_BASE``  – e.g. ``"https://aihubmix.com/v1"``
+        - ``OPENAI_API_KEY``          – fallback key (set to volcengine key)
         - ``MAX_CONCURRENT_REQUESTS`` – concurrency cap for LLM calls
         - ``REQUEST_TIMEOUT``         – per-request timeout in seconds
+        - ``QLIB_DATA_PATH``          – path to Qlib binary data
+        - ``MAX_ITERATIONS``          – max RD-Agent evolution iterations
 
     Args:
         config: Application configuration containing LLM and RD-Agent settings.
@@ -88,23 +91,46 @@ def _build_rdagent_env(config: AppConfig) -> Dict[str, str]:
     """
     env = os.environ.copy()
 
-    # LLM / backend settings
+    # ── LiteLLM backend selection ──
+    # RD-Agent reads BACKEND to pick the API backend class.
+    # See: rdagent/oai/llm_conf.py -> LLMSettings.backend
+    env["BACKEND"] = "rdagent.oai.backend.LiteLLMAPIBackend"
+
+    # ── Chat model settings ──
+    # LiteLLM natively supports volcengine/ prefix and reads VOLCENGINE_API_KEY.
     env["CHAT_MODEL"] = config.llm.chat_model
-    env["EMBEDDING_MODEL"] = config.llm.embedding_model
     env["VOLCENGINE_API_KEY"] = config.llm.volcengine_api_key
-    env["VOLCENGINE_BASE_URL"] = config.llm.volcengine_base_url
-    env["AIHUBMIX_API_KEY"] = config.llm.aihubmix_api_key
-    env["AIHUBMIX_BASE_URL"] = config.llm.aihubmix_base_url
-    env["USE_CHAT_BACKEND"] = "rdagent.oai.backend.LiteLLMAPIBackend"
+    # Only set base URL if configured (LiteLLM defaults to the standard Volcengine endpoint)
+    if config.llm.volcengine_base_url:
+        env["VOLCENGINE_API_BASE"] = config.llm.volcengine_base_url
+
+    # ── Embedding model settings ──
+    # When chat and embedding use DIFFERENT providers, RD-Agent docs say:
+    #   EMBEDDING_MODEL=litellm_proxy/<model_name>
+    #   LITELLM_PROXY_API_KEY=<embedding_provider_key>
+    #   LITELLM_PROXY_API_BASE=<embedding_provider_base>
+    # See: https://github.com/microsoft/RD-Agent/blob/main/docs/installation_and_configuration.rst
+    env["EMBEDDING_MODEL"] = config.llm.embedding_model
+    env["LITELLM_PROXY_API_KEY"] = config.llm.aihubmix_api_key
+    env["LITELLM_PROXY_API_BASE"] = config.llm.aihubmix_base_url
+
+    # ── Fallback OPENAI_API_KEY ──
+    # Some RD-Agent code paths (health_check, token counting) still reference
+    # OPENAI_API_KEY as a fallback.  Set it to the volcengine key so those
+    # paths don't crash.
+    env["OPENAI_API_KEY"] = config.llm.volcengine_api_key
+
+    # ── Concurrency & timeout ──
     env["MAX_CONCURRENT_REQUESTS"] = str(config.llm.max_concurrent_requests)
     env["REQUEST_TIMEOUT"] = str(config.llm.request_timeout)
 
-    # RD-Agent scenario hints
+    # ── RD-Agent scenario hints ──
     env["QLIB_DATA_PATH"] = str(_resolve_path(config.rdagent.qlib_data_path))
     env["MAX_ITERATIONS"] = str(config.rdagent.max_iterations)
 
     logger.debug(
-        "RD-Agent env overlay — CHAT_MODEL={}, EMBEDDING_MODEL={}",
+        "RD-Agent env overlay — BACKEND={}, CHAT_MODEL={}, EMBEDDING_MODEL={}",
+        env["BACKEND"],
         env["CHAT_MODEL"],
         env["EMBEDDING_MODEL"],
     )
