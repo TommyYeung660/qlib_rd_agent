@@ -110,7 +110,7 @@ def download_shared_data(config: AppConfig) -> Path:
     # ------------------------------------------------------------------
     zip_path = local_dir / "qlib_binary.zip"
     if zip_path.exists():
-        qlib_dir = Path(config.rdagent.qlib_data_path)
+        qlib_dir = Path(config.rdagent.qlib_data_path).expanduser()
 
         if qlib_dir.exists():
             logger.info("Removing existing Qlib binary directory: {}", qlib_dir)
@@ -173,7 +173,7 @@ def upload_run_log(config: AppConfig, run_metadata: Dict[str, Any]) -> None:
     """
     client = _create_dropbox_client(config)
 
-    workspace_dir = Path(config.rdagent.workspace_dir)
+    workspace_dir = Path(config.rdagent.workspace_dir).expanduser()
     workspace_dir.mkdir(parents=True, exist_ok=True)
 
     temp_path = workspace_dir / "run_log.json"
@@ -213,7 +213,7 @@ def check_remote_data_freshness(config: AppConfig) -> Optional[Dict[str, Any]]:
     # ------------------------------------------------------------------
     # Download remote manifest to a temp location
     # ------------------------------------------------------------------
-    workspace_dir = Path(config.rdagent.workspace_dir)
+    workspace_dir = Path(config.rdagent.workspace_dir).expanduser()
     workspace_dir.mkdir(parents=True, exist_ok=True)
     remote_manifest_tmp = workspace_dir / "remote_manifest.json"
 
