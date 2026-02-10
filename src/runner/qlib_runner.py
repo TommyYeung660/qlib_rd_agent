@@ -14,6 +14,55 @@ from loguru import logger
 from src.config import AppConfig
 
 
+def _find_conda_executable() -> str:
+    """Locate the conda executable, checking common Miniforge/Miniconda paths.
+
+    Returns:
+        Absolute path to the conda binary.
+
+    Raises:
+        FileNotFoundError: If conda cannot be found anywhere.
+    """
+    import shutil
+
+    # 1. Already on PATH?
+    conda_path = shutil.which("conda")
+    if conda_path:
+        return conda_path
+
+    # 2. Check common installation directories
+    home = Path.home()
+    candidates = [
+        home / "miniforge3" / "bin" / "conda",
+        home / "miniforge3" / "condabin" / "conda",
+        home / "miniconda3" / "bin" / "conda",
+        home / "miniconda3" / "condabin" / "conda",
+        home / "anaconda3" / "bin" / "conda",
+        Path("/opt/conda/bin/conda"),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            logger.debug("Found conda at: {}", candidate)
+            return str(candidate)
+
+    raise FileNotFoundError(
+        "conda executable not found on PATH or in standard locations: "
+        + ", ".join(str(c) for c in candidates)
+    )
+
+
+def _resolve_path(path_str: str) -> Path:
+    """Resolve a path string, expanding ``~`` to the user's home directory.
+
+    Args:
+        path_str: Path string that may contain ``~``.
+
+    Returns:
+        Fully resolved :class:`~pathlib.Path`.
+    """
+    return Path(path_str).expanduser().resolve()
+
+
 def _build_rdagent_env(config: AppConfig) -> Dict[str, str]:
     """Build environment variables dict for RD-Agent subprocess.
 
@@ -51,7 +100,7 @@ def _build_rdagent_env(config: AppConfig) -> Dict[str, str]:
     env["REQUEST_TIMEOUT"] = str(config.llm.request_timeout)
 
     # RD-Agent scenario hints
-    env["QLIB_DATA_PATH"] = str(Path(config.rdagent.qlib_data_path).resolve())
+    env["QLIB_DATA_PATH"] = str(_resolve_path(config.rdagent.qlib_data_path))
     env["MAX_ITERATIONS"] = str(config.rdagent.max_iterations)
 
     logger.debug(
@@ -79,7 +128,7 @@ def _verify_prerequisites(config: AppConfig) -> None:
         FileNotFoundError: If Qlib binary data directory is missing or empty.
     """
     # 1. Qlib data path
-    qlib_data = Path(config.rdagent.qlib_data_path).resolve()
+    qlib_data = _resolve_path(config.rdagent.qlib_data_path)
     if not qlib_data.exists():
         raise FileNotFoundError(
             "Qlib data directory does not exist: {}".format(qlib_data)
@@ -91,8 +140,9 @@ def _verify_prerequisites(config: AppConfig) -> None:
 
     # 2. Conda availability
     try:
+        conda_bin = _find_conda_executable()
         result = subprocess.run(
-            ["conda", "--version"],
+            [conda_bin, "--version"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -101,14 +151,14 @@ def _verify_prerequisites(config: AppConfig) -> None:
             raise RuntimeError(
                 "conda --version exited with code {}".format(result.returncode)
             )
-        logger.info("Conda OK — {}", result.stdout.strip())
+        logger.info("Conda OK — {} ({})", result.stdout.strip(), conda_bin)
     except FileNotFoundError as exc:
         raise RuntimeError("conda is not installed or not on PATH") from exc
 
     # 3. Conda environment exists
     try:
         result = subprocess.run(
-            ["conda", "env", "list", "--json"],
+            [conda_bin, "env", "list", "--json"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -179,13 +229,14 @@ def run_rdagent(config: AppConfig) -> Path:
 
     # --- Step 3: workspace ---
     timestamp = start_time.strftime("%Y%m%d_%H%M%S")
-    workspace_dir = Path(config.rdagent.workspace_dir).resolve() / timestamp
+    workspace_dir = _resolve_path(config.rdagent.workspace_dir) / timestamp
     workspace_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Workspace directory: {}", workspace_dir)
 
     # --- Step 4: launch command ---
+    conda_bin = _find_conda_executable()
     cmd: List[str] = [
-        "conda",
+        conda_bin,
         "run",
         "-n",
         config.rdagent.conda_env_name,
