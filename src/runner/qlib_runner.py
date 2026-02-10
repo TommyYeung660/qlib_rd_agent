@@ -240,7 +240,6 @@ def run_rdagent(config: AppConfig) -> Path:
         "run",
         "-n",
         config.rdagent.conda_env_name,
-        "--no-banner",
         "python",
         "-m",
         "rdagent.app.qlib_rd_loop",
