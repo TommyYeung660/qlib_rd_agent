@@ -135,6 +135,12 @@ echo "Verification: conda env list"
 conda env list
 
 # ---------------------------------------------------------------------------
+# Reload PATH so uv/conda/cuda are available in this session
+# ---------------------------------------------------------------------------
+source "$HOME/.bashrc" 2>/dev/null || true
+export PATH="$HOME/.local/bin:$HOME/miniforge3/bin:/usr/local/cuda-12.1/bin:$PATH"
+
+# ---------------------------------------------------------------------------
 echo "=== [6/7] Setting up qlib_rd_agent project ==="
 # ---------------------------------------------------------------------------
 if [ ! -d "$PROJECT_DIR" ]; then
