@@ -240,9 +240,8 @@ def run_rdagent(config: AppConfig) -> Path:
         "run",
         "-n",
         config.rdagent.conda_env_name,
-        "python",
-        "-m",
-        "rdagent.app.qlib_rd_loop",
+        "rdagent",
+        "fin_factor",
     ]
     logger.info("Launching RD-Agent: {}", " ".join(cmd))
 
