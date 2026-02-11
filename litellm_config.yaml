@@ -1,12 +1,12 @@
 # LiteLLM Configuration for qlib_rd_agent
 # Maps OpenAI-compatible model names to actual backends
 #
-# RD-Agent expects OpenAI-style model names.
-# LiteLLM translates these to the actual provider APIs.
-#
-# Chat:      Volcengine (火山引擎) glm-4.7
-# Embedding: AIHUBMIX text-embedding-3-small
-#   (Volcengine does not support embedding endpoints)
+# STRATEGY: Volcengine Coding Endpoint via OpenAI Provider
+# 1. Base URL: https://ark.cn-beijing.volces.com/api/coding/v3
+# 2. Provider: "openai" (bypasses LiteLLM's strict "volcengine" provider checks)
+# 3. Models: Maps standard OpenAI names (gpt-4o) to Volcengine model IDs
+#    - We use "openai/glm-4-7-251222" to target the specific GLM-4 model
+#    - The "coding" endpoint allows more flexible model naming than standard api/v3
 #
 # Usage: Set LITELLM_CONFIG_PATH=litellm_config.yaml in .env
 
@@ -15,21 +15,21 @@ model_list:
   # RD-Agent calls "gpt-4o" or similar → routed to Volcengine glm-4.7
   - model_name: "volcengine/glm-4.7"
     litellm_params:
-      model: "openai/glm-4-7-251222"
+      model: "openai/glm-4.7"  # Use openai provider to bypass strict checks
       api_key: "os.environ/VOLCENGINE_API_KEY"
       api_base: "os.environ/VOLCENGINE_BASE_URL"
-      drop_params: true  # Drop unsupported OpenAI params
-
+      drop_params: true
+      
   - model_name: "gpt-4o"
     litellm_params:
-      model: "openai/glm-4-7-251222"
+      model: "openai/glm-4.7"
       api_key: "os.environ/VOLCENGINE_API_KEY"
       api_base: "os.environ/VOLCENGINE_BASE_URL"
-      drop_params: true  # Drop unsupported OpenAI params
+      drop_params: true
 
   - model_name: "gpt-4o-mini"
     litellm_params:
-      model: "openai/glm-4.7"
+      model: "openai/glm-4.7"  # Map mini to same strong model for now
       api_key: "os.environ/VOLCENGINE_API_KEY"
       api_base: "os.environ/VOLCENGINE_BASE_URL"
       drop_params: true
