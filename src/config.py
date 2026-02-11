@@ -122,7 +122,7 @@ def load_config() -> AppConfig:
         volcengine_api_key=os.getenv("VOLCENGINE_API_KEY", ""),
         volcengine_base_url=os.getenv(
             "VOLCENGINE_API_BASE",
-            "https://ark.cn-beijing.volces.com/api/v3",
+            "https://ark.cn-beijing.volces.com/api/coding/v3",
         ),
         aihubmix_api_key=os.getenv(
             "LITELLM_PROXY_API_KEY", os.getenv("AIHUBMIX_API_KEY", "")
