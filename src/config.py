@@ -112,7 +112,10 @@ def load_config() -> AppConfig:
 
     # Build LLMConfig
     llm = LLMConfig(
-        chat_model=os.getenv("CHAT_MODEL", "volcengine/glm-4.7"),
+        # Use 'gpt-4o' as default to leverage litellm_config.yaml mapping
+        # This routes via 'openai/' provider which is more tolerant of model names
+        # than the strict 'volcengine/' provider.
+        chat_model=os.getenv("CHAT_MODEL", "gpt-4o"),
         embedding_model=os.getenv(
             "EMBEDDING_MODEL", "litellm_proxy/text-embedding-3-small"
         ),
