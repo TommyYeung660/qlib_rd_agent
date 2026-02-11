@@ -141,6 +141,10 @@ def _build_rdagent_env(config: AppConfig) -> Dict[str, str]:
     env["QLIB_DATA_PATH"] = str(_resolve_path(config.rdagent.qlib_data_path))
     env["MAX_ITERATIONS"] = str(config.rdagent.max_iterations)
 
+    # ── Force Local Execution (No Docker) ──
+    # This tells RD-Agent's ModelCoSTEER to use QlibCondaEnv instead of QTDockerEnv.
+    env["MODEL_COSTEER_ENV_TYPE"] = "conda"
+
     logger.debug(
         "RD-Agent env overlay — BACKEND={}, CHAT_MODEL={}, EMBEDDING_MODEL={}",
         env["BACKEND"],
@@ -271,6 +275,42 @@ def run_rdagent(config: AppConfig) -> Path:
     workspace_dir = _resolve_path(config.rdagent.workspace_dir) / timestamp
     workspace_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Workspace directory: {}", workspace_dir)
+
+    # --- Step 3.5: Prepare Data (Bypass Docker) ---
+    # Copy prep script to workspace
+    prep_script_src = Path(__file__).parent / "prepare_data.py"
+    if prep_script_src.exists():
+        import shutil
+
+        shutil.copy2(prep_script_src, workspace_dir / "prepare_data.py")
+
+        # Run preparation in conda env
+        conda_bin = _find_conda_executable()
+        prep_cmd = [
+            conda_bin,
+            "run",
+            "-n",
+            config.rdagent.conda_env_name,
+            "python",
+            "prepare_data.py",
+            env["QLIB_DATA_PATH"],
+        ]
+        logger.info("Running data preparation (to skip Docker requirement)...")
+        try:
+            subprocess.run(
+                prep_cmd,
+                check=True,
+                env=env,
+                cwd=str(workspace_dir),
+                capture_output=False,  # Let it print to stdout
+            )
+        except subprocess.CalledProcessError as e:
+            logger.error("Data preparation failed: {}", e)
+            # We don't raise here, hoping RD-Agent might recover or user checks logs
+    else:
+        logger.warning(
+            "prepare_data.py not found at {}, skipping local data gen", prep_script_src
+        )
 
     # --- Step 4: launch command ---
     conda_bin = _find_conda_executable()
