@@ -15,14 +15,14 @@ model_list:
   # RD-Agent calls "gpt-4o" or similar → routed to Volcengine glm-4.7
   - model_name: "volcengine/glm-4.7"
     litellm_params:
-      model: "openai/doubao-pro-32k"
+      model: "openai/glm-4-7-251222"
       api_key: "os.environ/VOLCENGINE_API_KEY"
       api_base: "os.environ/VOLCENGINE_BASE_URL"
       drop_params: true  # Drop unsupported OpenAI params
 
   - model_name: "gpt-4o"
     litellm_params:
-      model: "openai/doubao-pro-32k"
+      model: "openai/glm-4-7-251222"
       api_key: "os.environ/VOLCENGINE_API_KEY"
       api_base: "os.environ/VOLCENGINE_BASE_URL"
       drop_params: true  # Drop unsupported OpenAI params
