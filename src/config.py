@@ -35,7 +35,9 @@ class LLMConfig:
     chat_model: str = "volcengine/glm-4.7"
     embedding_model: str = "litellm_proxy/text-embedding-3-small"
     volcengine_api_key: str = ""
-    volcengine_base_url: str = "https://ark.cn-beijing.volces.com/api/v3"
+    # Use the "coding" endpoint which supports generic model names (unlike api/v3 which needs ep-xxxx)
+    # We use the 'openai' provider in LiteLLM to bypass strict Volcengine checks
+    volcengine_base_url: str = "https://ark.cn-beijing.volces.com/api/coding/v3"
     aihubmix_api_key: str = ""
     aihubmix_base_url: str = "https://aihubmix.com/v1"
     litellm_config_path: str = "litellm_config.yaml"
@@ -120,6 +122,7 @@ def load_config() -> AppConfig:
             "EMBEDDING_MODEL", "litellm_proxy/text-embedding-3-small"
         ),
         volcengine_api_key=os.getenv("VOLCENGINE_API_KEY", ""),
+        # Default to coding endpoint for better model name compatibility
         volcengine_base_url=os.getenv(
             "VOLCENGINE_API_BASE",
             "https://ark.cn-beijing.volces.com/api/coding/v3",

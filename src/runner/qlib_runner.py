@@ -96,13 +96,40 @@ def _build_rdagent_env(config: AppConfig) -> Dict[str, str]:
     # See: rdagent/oai/llm_conf.py -> LLMSettings.backend
     env["BACKEND"] = "rdagent.oai.backend.LiteLLMAPIBackend"
 
-    # ── Chat model settings ──
-    # LiteLLM natively supports volcengine/ prefix and reads VOLCENGINE_API_KEY.
-    env["CHAT_MODEL"] = config.llm.chat_model
+    # ── Force OpenAI Provider Logic for Volcengine ──
+    # We use the "coding" endpoint which supports generic model names.
+    # To avoid LiteLLM's strict endpoint checks for 'volcengine' provider,
+    # we masquerade as 'openai' provider but point to Volcengine's URL.
+    # This requires specific env vars to be set.
+
+    # 1. Force clear proxies to match debug_litellm.py success state
+    for proxy_var in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ]:
+        if proxy_var in os.environ:
+            del os.environ[proxy_var]
+            if proxy_var in env:
+                del env[proxy_var]
+
+    # 2. Inject Volcengine credentials as OpenAI vars for the child process
+    env["OPENAI_API_KEY"] = config.llm.volcengine_api_key
+    env["OPENAI_BASE_URL"] = (
+        config.llm.volcengine_base_url
+    )  # LiteLLM uses OPENAI_BASE_URL
+    env["OPENAI_API_BASE"] = config.llm.volcengine_base_url  # Legacy support
+
+    # 3. Ensure Volcengine vars are also present (LiteLLM might look for them)
     env["VOLCENGINE_API_KEY"] = config.llm.volcengine_api_key
-    # Only set base URL if configured (LiteLLM defaults to the standard Volcengine endpoint)
-    if config.llm.volcengine_base_url:
-        env["VOLCENGINE_API_BASE"] = config.llm.volcengine_base_url
+    env["VOLCENGINE_API_BASE"] = config.llm.volcengine_base_url
+
+    # 4. Force CHAT_MODEL to use openai/ prefix directly
+    # This bypasses litellm_config.yaml mapping issues and forces the provider
+    env["CHAT_MODEL"] = "openai/glm-4.7"
 
     # ── Embedding model settings ──
     # When chat and embedding use DIFFERENT providers, RD-Agent docs say:
