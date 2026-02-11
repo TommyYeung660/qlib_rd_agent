@@ -110,7 +110,20 @@ def _build_rdagent_env(config: AppConfig) -> Dict[str, str]:
     #   LITELLM_PROXY_API_KEY=<embedding_provider_key>
     #   LITELLM_PROXY_API_BASE=<embedding_provider_base>
     # See: https://github.com/microsoft/RD-Agent/blob/main/docs/installation_and_configuration.rst
-    env["EMBEDDING_MODEL"] = config.llm.embedding_model
+
+    # Fix: Ensure model name uses litellm_proxy/ prefix if we are using the proxy vars
+    embedding_model = config.llm.embedding_model
+    if embedding_model.startswith("aihubmix/"):
+        embedding_model = embedding_model.replace("aihubmix/", "litellm_proxy/")
+    elif (
+        not embedding_model.startswith("litellm_proxy/") and config.llm.aihubmix_api_key
+    ):
+        # If user didn't specify prefix but provided aihubmix key, assume proxy
+        # But be careful not to break other providers.
+        # For now, just handle the aihubmix/ case which is in the default config.
+        pass
+
+    env["EMBEDDING_MODEL"] = embedding_model
     env["LITELLM_PROXY_API_KEY"] = config.llm.aihubmix_api_key
     env["LITELLM_PROXY_API_BASE"] = config.llm.aihubmix_base_url
 
