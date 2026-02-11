@@ -145,6 +145,19 @@ def _build_rdagent_env(config: AppConfig) -> Dict[str, str]:
     # This tells RD-Agent's ModelCoSTEER to use QlibCondaEnv instead of QTDockerEnv.
     env["MODEL_COSTEER_ENV_TYPE"] = "conda"
 
+    # ── Force Clear Proxy Settings ──
+    # LiteLLM / RD-Agent can fail if proxies are set (Country not supported error).
+    # We clear them for the subprocess environment only.
+    for proxy_key in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "ALL_PROXY",
+    ]:
+        if proxy_key in env:
+            del env[proxy_key]
+
     logger.debug(
         "RD-Agent env overlay — BACKEND={}, CHAT_MODEL={}, EMBEDDING_MODEL={}",
         env["BACKEND"],
