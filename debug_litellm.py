@@ -1,6 +1,11 @@
 import os
 import sys
+import io
 from litellm import completion
+
+# Fix encoding on Windows
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8")
 
 # Setup environment exactly as in the app
 os.environ["VOLCENGINE_API_KEY"] = "0b79bb3c-b1b8-46bf-a104-836c76290427"
@@ -25,8 +30,8 @@ try:
         messages=[{"role": "user", "content": "Hello"}],
         verbose=True,  # Print debug info
     )
-    print("\n✅ Success!")
+    print("\n[SUCCESS]")
     print(response)
 except Exception as e:
-    print("\n❌ Failed!")
+    print("\n[FAILED]")
     print(e)
