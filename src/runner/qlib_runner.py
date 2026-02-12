@@ -71,6 +71,7 @@ def _build_rdagent_env(config: AppConfig) -> Dict[str, str]:
     specific settings derived from *config*.
 
     Environment variables set:
+        - ``PYTHONUNBUFFERED``        – ``"1"`` (force unbuffered output)
         - ``BACKEND``                 – ``"rdagent.oai.backend.LiteLLMAPIBackend"``
         - ``CHAT_MODEL``              – e.g. ``"volcengine/glm-4.7"``
         - ``EMBEDDING_MODEL``         – e.g. ``"litellm_proxy/text-embedding-3-small"``
@@ -91,6 +92,12 @@ def _build_rdagent_env(config: AppConfig) -> Dict[str, str]:
         A new *dict* suitable for passing as ``env`` to :func:`subprocess.Popen`.
     """
     env = os.environ.copy()
+
+    # ── Force unbuffered Python output ──
+    # When Python runs in a non-TTY subprocess (PIPE), it enables full buffering by default.
+    # This causes output to be stuck in the buffer until the process exits or buffer fills.
+    # Setting PYTHONUNBUFFERED=1 forces line-buffered output even in non-TTY mode.
+    env["PYTHONUNBUFFERED"] = "1"
 
     # ── LiteLLM backend selection ──
     # RD-Agent reads BACKEND to pick the API backend class.
@@ -417,19 +424,15 @@ def run_rdagent(config: AppConfig) -> Path:
 
     proc = subprocess.Popen(
         cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
+        stdout=None,
+        stderr=None,
         env=env,
         cwd=str(workspace_dir),
     )
 
-    # --- Step 5: stream output ---
-    if proc.stdout is not None:
-        for raw_line in proc.stdout:
-            line = raw_line.decode("utf-8", errors="replace").rstrip()
-            if line:
-                logger.info("[rdagent] {}", line)
-
+    # --- Step 5: wait for completion ---
+    # We stopped piping output (stdout=None) so that RD-Agent's progress bars (tqdm/rich)
+    # work correctly in the terminal. The user needs to see real-time progress.
     return_code = proc.wait()
     end_time = datetime.now()
 
