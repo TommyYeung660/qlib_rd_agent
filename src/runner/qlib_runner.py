@@ -387,6 +387,7 @@ def run_rdagent(config: AppConfig) -> Path:
         prep_cmd = [
             conda_bin,
             "run",
+            "--no-capture-output",
             "-n",
             config.rdagent.conda_env_name,
             "python",
@@ -415,6 +416,7 @@ def run_rdagent(config: AppConfig) -> Path:
     cmd: List[str] = [
         conda_bin,
         "run",
+        "--no-capture-output",
         "-n",
         config.rdagent.conda_env_name,
         "rdagent",
