@@ -135,4 +135,8 @@ data/
 workspace/
 models/
 outputs/
-mlruns/
+
+# RD-Agent temporary artifacts
+RD-Agent-tmp/
+Userstommy.yeungAppDataLocalTempRD-Agent_repo/
+temp_rd_agent/
