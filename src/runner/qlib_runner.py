@@ -12,6 +12,7 @@ import yaml
 from loguru import logger
 
 from src.config import AppConfig
+from src.runner.patch_generated_code import patch_generated_code_in_workspace
 
 
 def _find_conda_executable() -> str:
@@ -194,6 +195,51 @@ def _build_rdagent_env(config: AppConfig) -> Dict[str, str]:
     return env
 
 
+def _setup_qlib_data_symlinks(config: AppConfig) -> None:
+    """Create symlinks from common hardcoded Qlib paths to actual QLIB_DATA_PATH.
+
+    RD-Agent's LLM generates code with hardcoded paths like:
+        - ~/.qlib/qlib_data/cn_data
+        - /path/to/qlib_data/cn_data
+
+    This function creates symlinks from these expected locations to the actual
+    configured QLIB_DATA_PATH so that hardcoded paths still work.
+
+    Args:
+        config: Application configuration containing qlib_data_path.
+    """
+    actual_path = _resolve_path(config.rdagent.qlib_data_path)
+
+    # List of common hardcoded paths the LLM might generate
+    # (relative to home directory or absolute paths)
+    symlink_targets = [
+        Path.home() / ".qlib" / "qlib_data" / "cn_data",
+        Path.home() / ".qlib" / "qlib_data",
+        Path("/path/to/qlib_data/cn_data"),
+        Path("/path/to/qlib_data"),
+    ]
+
+    for target_link in symlink_targets:
+        try:
+            # Skip if target doesn't exist (e.g., /path/to/...)
+            if target_link.parent.exists() or target_link.parent == Path.home():
+                # Ensure parent directory exists
+                target_link.parent.mkdir(parents=True, exist_ok=True)
+
+                # Create symlink if it doesn't exist
+                if not target_link.exists():
+                    target_link.symlink_to(actual_path)
+                    logger.debug("Created symlink: {} -> {}", target_link, actual_path)
+                elif target_link.is_symlink() and target_link.resolve() != actual_path:
+                    # Update existing symlink if it points to wrong location
+                    target_link.unlink()
+                    target_link.symlink_to(actual_path)
+                    logger.debug("Updated symlink: {} -> {}", target_link, actual_path)
+        except (OSError, PermissionError) as exc:
+            # Log but don't fail - some paths might not be creatable (e.g., /path/to/)
+            logger.debug("Could not create symlink at {}: {}", target_link, exc)
+
+
 def _verify_prerequisites(config: AppConfig) -> None:
     """Verify that required tools and data are available before launching RD-Agent.
 
@@ -309,6 +355,11 @@ def run_rdagent(config: AppConfig) -> Path:
 
     # --- Step 2: environment ---
     env = _build_rdagent_env(config)
+
+    # --- Step 2.5: Setup symlinks for hardcoded paths ---
+    # RD-Agent's LLM generates code with hardcoded paths like ~/.qlib/qlib_data/cn_data
+    # Create symlinks from common hardcoded paths to the actual QLIB_DATA_PATH
+    _setup_qlib_data_symlinks(config)
 
     # --- Step 3: workspace ---
     timestamp = start_time.strftime("%Y%m%d_%H%M%S")
