@@ -12,6 +12,18 @@ from loguru import logger
 from src.config import AppConfig
 from src.utils.dropbox_client import DropboxClient
 
+_RUN_ARCHIVE_FILENAMES = (
+    "run_metadata.json",
+    "run_artifacts.json",
+    "events.jsonl",
+    "console.raw.log",
+    "stdout.raw.log",
+    "stderr.raw.log",
+    "discovered_factors.yaml",
+    "candidate_factors.yaml",
+    "factor_manifest.json",
+)
+
 
 def _create_dropbox_client(config: AppConfig) -> DropboxClient:
     """Create an authenticated DropboxClient from config."""
@@ -231,6 +243,39 @@ def upload_run_log(config: AppConfig, run_metadata: Dict[str, Any]) -> None:
         if temp_path.exists():
             temp_path.unlink()
             logger.debug("Cleaned up temporary run log file: {}", temp_path)
+
+
+def upload_run_archive(
+    config: AppConfig, archive_dir: Path, run_id: str
+) -> Dict[str, bool]:
+    """Upload a curated per-run archive batch to Dropbox.
+
+    Args:
+        config: Application configuration.
+        archive_dir: Local workspace directory containing run artifacts.
+        run_id: Immutable run identifier used in the Dropbox path.
+
+    Returns:
+        Mapping of filename -> upload success.
+    """
+    client = _create_dropbox_client(config)
+    results: Dict[str, bool] = {}
+    remote_base = "{}/runs/{}".format(config.dropbox.remote_rdagent_folder, run_id)
+
+    for filename in _RUN_ARCHIVE_FILENAMES:
+        local_path = archive_dir / filename
+        if not local_path.exists():
+            continue
+        remote_path = "{}/{}".format(remote_base, filename)
+        logger.info("Uploading run archive artifact {} -> {}", local_path, remote_path)
+        results[filename] = client.upload_file(local_path, remote_path)
+
+    logger.info(
+        "Run archive upload complete for {}: {} artifacts",
+        run_id,
+        len(results),
+    )
+    return results
 
 
 def check_remote_data_freshness(config: AppConfig) -> Optional[Dict[str, Any]]:

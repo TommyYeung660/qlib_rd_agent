@@ -4,15 +4,29 @@ import json
 import os
 import re
 import subprocess
+import sys
+import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TextIO
 
 import yaml
 from loguru import logger
 
 from src.config import AppConfig
 from src.runner.patch_generated_code import patch_generated_code_in_workspace
+
+_RUN_ARCHIVE_FILENAMES = (
+    "run_metadata.json",
+    "run_artifacts.json",
+    "events.jsonl",
+    "console.raw.log",
+    "stdout.raw.log",
+    "stderr.raw.log",
+    "discovered_factors.yaml",
+    "candidate_factors.yaml",
+    "factor_manifest.json",
+)
 
 
 def _find_conda_executable() -> str:
@@ -62,6 +76,297 @@ def _resolve_path(path_str: str) -> Path:
         Fully resolved :class:`~pathlib.Path`.
     """
     return Path(path_str).expanduser().resolve()
+
+
+def _build_run_id(timestamp: datetime | None = None) -> str:
+    ts = timestamp or datetime.utcnow()
+    return ts.strftime("%Y-%m-%dT%H-%M-%SZ")
+
+
+def _build_stream_capture_mode(platform_name: str | None = None) -> str:
+    target = platform_name or os.name
+    return "pty" if target == "posix" else "pipe"
+
+
+def _build_workspace_dir(base_dir: str, timestamp: datetime | None = None) -> Path:
+    ts = timestamp or datetime.utcnow()
+    return _resolve_path(base_dir) / ts.strftime("%Y%m%d_%H%M%S")
+
+
+def _initialize_run_archive(workspace_dir: Path, run_id: str) -> Dict[str, Path]:
+    del run_id  # reserved for future archive namespacing
+
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    archive_paths = {
+        "stdout": workspace_dir / "stdout.raw.log",
+        "stderr": workspace_dir / "stderr.raw.log",
+        "console": workspace_dir / "console.raw.log",
+        "events": workspace_dir / "events.jsonl",
+        "artifacts": workspace_dir / "run_artifacts.json",
+        "metadata": workspace_dir / "run_metadata.json",
+    }
+    for path in archive_paths.values():
+        if not path.exists():
+            path.touch()
+    return archive_paths
+
+
+def _append_run_event(
+    archive_paths: Dict[str, Path],
+    *,
+    level: str,
+    event: str,
+    run_id: str,
+    workspace_dir: str,
+    step: str,
+    message: str,
+    data: Optional[Dict[str, Any]] = None,
+    write_lock: threading.Lock | None = None,
+) -> None:
+    payload = {
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "level": level,
+        "event": event,
+        "run_id": run_id,
+        "workspace_dir": workspace_dir,
+        "step": step,
+        "message": message,
+        "data": data or {},
+    }
+    encoded = json.dumps(payload, ensure_ascii=False)
+    if write_lock is None:
+        with open(archive_paths["events"], "a", encoding="utf-8") as fh:
+            fh.write(encoded + "\n")
+    else:
+        with write_lock:
+            with open(archive_paths["events"], "a", encoding="utf-8") as fh:
+                fh.write(encoded + "\n")
+
+
+def _record_stream_line(
+    archive_paths: Dict[str, Path],
+    *,
+    stream_name: str,
+    line: str,
+    run_id: str,
+    workspace_dir: str,
+    stream_counts: Dict[str, int],
+    step: str,
+    write_lock: threading.Lock | None = None,
+) -> None:
+    if stream_name not in {"stdout", "stderr"}:
+        raise ValueError("stream_name must be stdout or stderr")
+
+    level = "ERROR" if stream_name == "stderr" else "INFO"
+    encoded_line = line
+
+    def _write_files() -> None:
+        with open(archive_paths[stream_name], "a", encoding="utf-8") as stream_fh:
+            stream_fh.write(encoded_line)
+        with open(archive_paths["console"], "a", encoding="utf-8") as console_fh:
+            console_fh.write(encoded_line)
+
+    if write_lock is None:
+        _write_files()
+    else:
+        with write_lock:
+            _write_files()
+
+    stream_counts[stream_name] = stream_counts.get(stream_name, 0) + 1
+    _append_run_event(
+        archive_paths,
+        level=level,
+        event=f"rdagent_{stream_name}_line",
+        run_id=run_id,
+        workspace_dir=workspace_dir,
+        step=step,
+        message=f"Captured {stream_name} line",
+        data={
+            "stream_name": stream_name,
+            "line": encoded_line.rstrip("\n"),
+            "line_count": stream_counts[stream_name],
+        },
+        write_lock=write_lock,
+    )
+
+
+def _run_archive_artifact_items(
+    workspace_dir: Path,
+    archive_paths: Dict[str, Path],
+    upload_results: Dict[str, bool] | None = None,
+) -> List[Dict[str, Any]]:
+    upload_results = upload_results or {}
+    items: List[Dict[str, Any]] = []
+    seen_names: set[str] = set()
+
+    for name, path in sorted(archive_paths.items()):
+        file_name = path.name
+        if file_name in seen_names:
+            continue
+        seen_names.add(file_name)
+        items.append(
+            {
+                "name": file_name,
+                "path": str(path),
+                "kind": "log" if path.suffix == ".log" else "metadata",
+                "exists": path.exists(),
+                "uploaded": upload_results.get(file_name),
+            }
+        )
+
+    for file_name in _RUN_ARCHIVE_FILENAMES:
+        candidate = workspace_dir / file_name
+        if file_name in seen_names or not candidate.exists():
+            continue
+        seen_names.add(file_name)
+        items.append(
+            {
+                "name": file_name,
+                "path": str(candidate),
+                "kind": "artifact",
+                "exists": True,
+                "uploaded": upload_results.get(file_name),
+            }
+        )
+
+    return items
+
+
+def _write_run_artifacts_index(
+    *,
+    workspace_dir: Path,
+    run_id: str,
+    archive_paths: Dict[str, Path],
+    upload_results: Dict[str, bool] | None = None,
+) -> Path:
+    payload = {
+        "run_id": run_id,
+        "workspace_dir": str(workspace_dir.resolve()),
+        "artifacts": _run_archive_artifact_items(
+            workspace_dir=workspace_dir,
+            archive_paths=archive_paths,
+            upload_results=upload_results,
+        ),
+    }
+    artifacts_path = archive_paths["artifacts"]
+    artifacts_path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return artifacts_path
+
+
+def _forward_stream_output(
+    stream: TextIO | None,
+    *,
+    stream_name: str,
+    terminal_stream: TextIO,
+    archive_paths: Dict[str, Path],
+    run_id: str,
+    workspace_dir: str,
+    stream_counts: Dict[str, int],
+    write_lock: threading.Lock,
+) -> None:
+    if stream is None:
+        return
+
+    try:
+        for line in iter(stream.readline, ""):
+            if line == "":
+                break
+            _record_stream_line(
+                archive_paths,
+                stream_name=stream_name,
+                line=line,
+                run_id=run_id,
+                workspace_dir=workspace_dir,
+                stream_counts=stream_counts,
+                step="rdagent",
+                write_lock=write_lock,
+            )
+            terminal_stream.write(line)
+            terminal_stream.flush()
+    finally:
+        stream.close()
+
+
+def _record_stream_chunk(
+    archive_paths: Dict[str, Path],
+    *,
+    stream_name: str,
+    chunk: bytes,
+    run_id: str,
+    workspace_dir: str,
+    stream_counts: Dict[str, int],
+    step: str,
+    write_lock: threading.Lock,
+) -> None:
+    decoded = chunk.decode("utf-8", errors="replace")
+
+    with write_lock:
+        with open(archive_paths[stream_name], "a", encoding="utf-8") as stream_fh:
+            stream_fh.write(decoded)
+        with open(archive_paths["console"], "a", encoding="utf-8") as console_fh:
+            console_fh.write(decoded)
+
+    increment = decoded.count("\n")
+    if decoded and increment == 0:
+        increment = 1
+    stream_counts[stream_name] = stream_counts.get(stream_name, 0) + increment
+    level = "ERROR" if stream_name == "stderr" else "INFO"
+    _append_run_event(
+        archive_paths,
+        level=level,
+        event=f"rdagent_{stream_name}_chunk",
+        run_id=run_id,
+        workspace_dir=workspace_dir,
+        step=step,
+        message=f"Captured {stream_name} chunk",
+        data={
+            "stream_name": stream_name,
+            "bytes": len(chunk),
+            "preview": decoded[:200],
+        },
+        write_lock=write_lock,
+    )
+
+
+def _forward_fd_output(
+    fd: int,
+    *,
+    stream_name: str,
+    terminal_stream: TextIO,
+    archive_paths: Dict[str, Path],
+    run_id: str,
+    workspace_dir: str,
+    stream_counts: Dict[str, int],
+    write_lock: threading.Lock,
+) -> None:
+    try:
+        while True:
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            _record_stream_chunk(
+                archive_paths,
+                stream_name=stream_name,
+                chunk=chunk,
+                run_id=run_id,
+                workspace_dir=workspace_dir,
+                stream_counts=stream_counts,
+                step="rdagent",
+                write_lock=write_lock,
+            )
+            terminal_stream.write(chunk.decode("utf-8", errors="replace"))
+            terminal_stream.flush()
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def _build_rdagent_env(config: AppConfig) -> Dict[str, str]:
@@ -331,7 +636,14 @@ def _verify_prerequisites(config: AppConfig) -> None:
     logger.info("AIHUBMIX API key configured")
 
 
-def run_rdagent(config: AppConfig) -> Path:
+def run_rdagent(
+    config: AppConfig,
+    *,
+    workspace_dir: Path | None = None,
+    run_id: str | None = None,
+    archive_paths: Dict[str, Path] | None = None,
+    stream_counts: Dict[str, int] | None = None,
+) -> Path:
     """Launch RD-Agent Qlib scenario as a subprocess and stream its output.
 
     Execution steps:
@@ -355,7 +667,8 @@ def run_rdagent(config: AppConfig) -> Path:
         RuntimeError: If RD-Agent exits with a non-zero return code.
         FileNotFoundError: If Qlib data is not available.
     """
-    start_time = datetime.now()
+    start_time = datetime.utcnow()
+    run_id = run_id or _build_run_id(start_time)
 
     # --- Step 1: prerequisites ---
     _verify_prerequisites(config)
@@ -369,10 +682,25 @@ def run_rdagent(config: AppConfig) -> Path:
     _setup_qlib_data_symlinks(config)
 
     # --- Step 3: workspace ---
-    timestamp = start_time.strftime("%Y%m%d_%H%M%S")
-    workspace_dir = _resolve_path(config.rdagent.workspace_dir) / timestamp
+    workspace_dir = workspace_dir or _build_workspace_dir(
+        config.rdagent.workspace_dir, start_time
+    )
     workspace_dir.mkdir(parents=True, exist_ok=True)
     logger.info("Workspace directory: {}", workspace_dir)
+    archive_paths = archive_paths or _initialize_run_archive(workspace_dir, run_id)
+    stream_counts = stream_counts or {"stdout": 0, "stderr": 0}
+    write_lock = threading.Lock()
+    _append_run_event(
+        archive_paths,
+        level="INFO",
+        event="rdagent_started",
+        run_id=run_id,
+        workspace_dir=str(workspace_dir),
+        step="rdagent",
+        message="Launching RD-Agent subprocess",
+        data={"max_iterations": config.rdagent.max_iterations},
+        write_lock=write_lock,
+    )
 
     # --- Step 3.5: Prepare Data (Bypass Docker) ---
     # Copy prep script to workspace
@@ -395,6 +723,16 @@ def run_rdagent(config: AppConfig) -> Path:
             env["QLIB_DATA_PATH"],
         ]
         logger.info("Running data preparation (to skip Docker requirement)...")
+        _append_run_event(
+            archive_paths,
+            level="INFO",
+            event="prepare_data_started",
+            run_id=run_id,
+            workspace_dir=str(workspace_dir),
+            step="prepare_data",
+            message="Preparing local Qlib data before RD-Agent launch",
+            write_lock=write_lock,
+        )
         try:
             subprocess.run(
                 prep_cmd,
@@ -403,8 +741,29 @@ def run_rdagent(config: AppConfig) -> Path:
                 cwd=str(workspace_dir),
                 capture_output=False,  # Let it print to stdout
             )
+            _append_run_event(
+                archive_paths,
+                level="INFO",
+                event="prepare_data_completed",
+                run_id=run_id,
+                workspace_dir=str(workspace_dir),
+                step="prepare_data",
+                message="Local data preparation completed",
+                write_lock=write_lock,
+            )
         except subprocess.CalledProcessError as e:
             logger.error("Data preparation failed: {}", e)
+            _append_run_event(
+                archive_paths,
+                level="ERROR",
+                event="prepare_data_failed",
+                run_id=run_id,
+                workspace_dir=str(workspace_dir),
+                step="prepare_data",
+                message="Local data preparation failed",
+                data={"return_code": e.returncode},
+                write_lock=write_lock,
+            )
             # We don't raise here, hoping RD-Agent might recover or user checks logs
     else:
         logger.warning(
@@ -424,46 +783,122 @@ def run_rdagent(config: AppConfig) -> Path:
     ]
     logger.info("Launching RD-Agent: {}", " ".join(cmd))
 
-    proc = subprocess.Popen(
-        cmd,
-        stdout=None,
-        stderr=None,
-        env=env,
-        cwd=str(workspace_dir),
-    )
+    capture_mode = _build_stream_capture_mode()
+    stdout_thread: threading.Thread
+    stderr_thread: threading.Thread
+
+    if capture_mode == "pty":
+        import pty
+
+        stdout_master, stdout_slave = pty.openpty()
+        stderr_master, stderr_slave = pty.openpty()
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=stdout_slave,
+                stderr=stderr_slave,
+                stdin=subprocess.DEVNULL,
+                env=env,
+                cwd=str(workspace_dir),
+                close_fds=True,
+            )
+        finally:
+            os.close(stdout_slave)
+            os.close(stderr_slave)
+
+        stdout_thread = threading.Thread(
+            target=_forward_fd_output,
+            kwargs={
+                "fd": stdout_master,
+                "stream_name": "stdout",
+                "terminal_stream": sys.stdout,
+                "archive_paths": archive_paths,
+                "run_id": run_id,
+                "workspace_dir": str(workspace_dir),
+                "stream_counts": stream_counts,
+                "write_lock": write_lock,
+            },
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=_forward_fd_output,
+            kwargs={
+                "fd": stderr_master,
+                "stream_name": "stderr",
+                "terminal_stream": sys.stderr,
+                "archive_paths": archive_paths,
+                "run_id": run_id,
+                "workspace_dir": str(workspace_dir),
+                "stream_counts": stream_counts,
+                "write_lock": write_lock,
+            },
+            daemon=True,
+        )
+    else:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            cwd=str(workspace_dir),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+        stdout_thread = threading.Thread(
+            target=_forward_stream_output,
+            kwargs={
+                "stream": proc.stdout,
+                "stream_name": "stdout",
+                "terminal_stream": sys.stdout,
+                "archive_paths": archive_paths,
+                "run_id": run_id,
+                "workspace_dir": str(workspace_dir),
+                "stream_counts": stream_counts,
+                "write_lock": write_lock,
+            },
+            daemon=True,
+        )
+        stderr_thread = threading.Thread(
+            target=_forward_stream_output,
+            kwargs={
+                "stream": proc.stderr,
+                "stream_name": "stderr",
+                "terminal_stream": sys.stderr,
+                "archive_paths": archive_paths,
+                "run_id": run_id,
+                "workspace_dir": str(workspace_dir),
+                "stream_counts": stream_counts,
+                "write_lock": write_lock,
+            },
+            daemon=True,
+        )
 
     # --- Step 5: wait for completion ---
-    # We stopped piping output (stdout=None) so that RD-Agent's progress bars (tqdm/rich)
-    # work correctly in the terminal. The user needs to see real-time progress.
+    stdout_thread.start()
+    stderr_thread.start()
     return_code = proc.wait()
-    end_time = datetime.now()
-
-    # --- Step 6: collect results ---
-    factors_path: Optional[str] = None
-    if return_code == 0:
-        logger.info("RD-Agent completed successfully (exit code 0)")
-        factors_path = collect_factors(str(workspace_dir), config=config)
-    else:
-        logger.error(
-            "RD-Agent exited with code {}. Attempting partial factor collection.",
-            return_code,
-        )
-        factors_path = collect_factors(str(workspace_dir), config=config)
-
-    # --- Step 7: metadata ---
-    metadata = _format_run_metadata(
-        config=config,
-        start_time=start_time,
-        end_time=end_time,
-        return_code=return_code,
+    stdout_thread.join()
+    stderr_thread.join()
+    event_name = "rdagent_completed" if return_code == 0 else "rdagent_failed"
+    level = "INFO" if return_code == 0 else "ERROR"
+    message = (
+        "RD-Agent subprocess completed"
+        if return_code == 0
+        else "RD-Agent subprocess failed"
+    )
+    _append_run_event(
+        archive_paths,
+        level=level,
+        event=event_name,
+        run_id=run_id,
         workspace_dir=str(workspace_dir),
-        factors_path=factors_path,
+        step="rdagent",
+        message=message,
+        data={"return_code": return_code},
+        write_lock=write_lock,
     )
-    metadata_path = workspace_dir / "run_metadata.json"
-    metadata_path.write_text(
-        json.dumps(metadata, indent=2, default=str), encoding="utf-8"
-    )
-    logger.info("Run metadata written to {}", metadata_path)
 
     if return_code != 0:
         raise RuntimeError("RD-Agent exited with non-zero code: {}".format(return_code))
@@ -717,6 +1152,10 @@ def _format_run_metadata(
     return_code: int,
     workspace_dir: str,
     factors_path: Optional[str],
+    run_id: str | None = None,
+    archive_paths: Dict[str, Path] | None = None,
+    stream_counts: Dict[str, int] | None = None,
+    log_capture_complete: bool = False,
 ) -> Dict[str, Any]:
     """Format metadata about a completed RD-Agent run.
 
@@ -746,11 +1185,21 @@ def _format_run_metadata(
         except (OSError, yaml.YAMLError) as exc:
             logger.warning("Failed to count factors from {}: {}", factors_path, exc)
 
+    stream_counts = stream_counts or {}
+
+    if return_code != 0:
+        status = "failed"
+    elif factors_count == 0:
+        status = "no_factors"
+    else:
+        status = "success"
+
     return {
+        "run_id": run_id,
         "start_time": start_time.isoformat(),
         "end_time": end_time.isoformat(),
         "duration_seconds": round(duration, 2),
-        "status": "success" if return_code == 0 else "failed",
+        "status": status,
         "return_code": return_code,
         "max_iterations": config.rdagent.max_iterations,
         "chat_model": config.llm.chat_model,
@@ -758,4 +1207,13 @@ def _format_run_metadata(
         "factors_discovered": factors_count,
         "factors_path": factors_path,
         "workspace_dir": workspace_dir,
+        "archive_dir": str(Path(workspace_dir).resolve()) if archive_paths else None,
+        "events_path": str(archive_paths["events"]) if archive_paths else None,
+        "console_log_path": str(archive_paths["console"]) if archive_paths else None,
+        "stdout_log_path": str(archive_paths["stdout"]) if archive_paths else None,
+        "stderr_log_path": str(archive_paths["stderr"]) if archive_paths else None,
+        "stdout_line_count": int(stream_counts.get("stdout", 0)),
+        "stderr_line_count": int(stream_counts.get("stderr", 0)),
+        "stderr_nonempty": bool(stream_counts.get("stderr", 0)),
+        "log_capture_complete": log_capture_complete,
     }

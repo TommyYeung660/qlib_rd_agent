@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.bridge.dropbox_sync import upload_factors
+from src.bridge.dropbox_sync import upload_factors, upload_run_archive
 from src.config import AppConfig, DropboxConfig
 
 
@@ -57,3 +57,33 @@ def test_upload_factors_keeps_legacy_behavior_when_only_discovered_exists(monkey
             "/qlib_shared/rdagent_outputs/factors/discovered_factors.yaml",
         )
     ]
+
+
+def test_upload_run_archive_uploads_timestamped_run_batch(monkeypatch, tmp_path: Path) -> None:
+    archive_dir = tmp_path / "2026-03-17T23-15-30Z"
+    archive_dir.mkdir()
+    for filename in [
+        "run_metadata.json",
+        "run_artifacts.json",
+        "events.jsonl",
+        "console.raw.log",
+        "stdout.raw.log",
+        "stderr.raw.log",
+    ]:
+        (archive_dir / filename).write_text("sample\n", encoding="utf-8")
+
+    fake_client = _FakeDropboxClient()
+    monkeypatch.setattr("src.bridge.dropbox_sync._create_dropbox_client", lambda config: fake_client)
+
+    config = AppConfig(
+        dropbox=DropboxConfig(remote_rdagent_folder="/qlib_shared/rdagent_outputs")
+    )
+    upload_run_archive(config, archive_dir, "2026-03-17T23-15-30Z")
+
+    remote_paths = [remote for _, remote in fake_client.uploads]
+    assert "/qlib_shared/rdagent_outputs/runs/2026-03-17T23-15-30Z/run_metadata.json" in remote_paths
+    assert "/qlib_shared/rdagent_outputs/runs/2026-03-17T23-15-30Z/run_artifacts.json" in remote_paths
+    assert "/qlib_shared/rdagent_outputs/runs/2026-03-17T23-15-30Z/events.jsonl" in remote_paths
+    assert "/qlib_shared/rdagent_outputs/runs/2026-03-17T23-15-30Z/console.raw.log" in remote_paths
+    assert "/qlib_shared/rdagent_outputs/runs/2026-03-17T23-15-30Z/stdout.raw.log" in remote_paths
+    assert "/qlib_shared/rdagent_outputs/runs/2026-03-17T23-15-30Z/stderr.raw.log" in remote_paths

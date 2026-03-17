@@ -61,6 +61,35 @@ Dropbox upload publishes all three artifacts under:
 
 This keeps the old `discovered_factors.yaml` path stable while giving the scanner an explicit `candidate`-stage contract to promote locally.
 
+## Run log archives
+
+For `v1.5.0`, each `full` run now produces an immutable log batch in the local workspace and uploads the same batch to Dropbox.
+
+Local workspace artifacts now include:
+
+- `run_metadata.json`
+- `run_artifacts.json`
+- `events.jsonl`
+- `console.raw.log`
+- `stdout.raw.log`
+- `stderr.raw.log`
+
+Dropbox keeps a per-run archive under:
+
+- `/qlib_shared/rdagent_outputs/runs/<run_id>/run_metadata.json`
+- `/qlib_shared/rdagent_outputs/runs/<run_id>/run_artifacts.json`
+- `/qlib_shared/rdagent_outputs/runs/<run_id>/events.jsonl`
+- `/qlib_shared/rdagent_outputs/runs/<run_id>/console.raw.log`
+- `/qlib_shared/rdagent_outputs/runs/<run_id>/stdout.raw.log`
+- `/qlib_shared/rdagent_outputs/runs/<run_id>/stderr.raw.log`
+
+Compatibility pointers remain in place:
+
+- `/qlib_shared/rdagent_outputs/run_log.json` stays as the latest-only summary
+- `/qlib_shared/rdagent_outputs/factors/...` stays as the latest factor hand-off path
+
+`stderr.raw.log` is preserved separately so operators can verify whether a run stayed quiet on stderr even when the overall status is `success`.
+
 ## End-to-end hand-off
 
 For `v1.5.0`, this repo is only the upstream candidate generator in the FX factor loop.

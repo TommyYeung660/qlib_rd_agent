@@ -9,8 +9,10 @@ Commands:
 
 from __future__ import annotations
 
+import json
 import sys
 from datetime import datetime
+from pathlib import Path
 
 import click
 from loguru import logger
@@ -30,6 +32,39 @@ def _setup_logging(log_level: str) -> None:
         level=log_level.upper(),
         format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level:<8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan> — <level>{message}</level>",
     )
+
+
+def _write_json_file(path: Path, payload: dict) -> None:
+    path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+
+
+def _prepare_run_context(config):
+    from src.runner.qlib_runner import (
+        _append_run_event,
+        _build_run_id,
+        _build_workspace_dir,
+        _initialize_run_archive,
+    )
+
+    start_time = datetime.utcnow()
+    run_id = _build_run_id(start_time)
+    workspace_dir = _build_workspace_dir(config.rdagent.workspace_dir, start_time)
+    archive_paths = _initialize_run_archive(workspace_dir, run_id)
+    stream_counts = {"stdout": 0, "stderr": 0}
+    _append_run_event(
+        archive_paths,
+        level="INFO",
+        event="run_started",
+        run_id=run_id,
+        workspace_dir=str(workspace_dir),
+        step="run",
+        message="Run context initialized",
+        data={"workspace_dir": str(workspace_dir)},
+    )
+    return start_time, run_id, workspace_dir, archive_paths, stream_counts
 
 
 @click.group()
@@ -86,7 +121,13 @@ def sync(ctx: click.Context, force: bool) -> None:
 @click.pass_context
 def run(ctx: click.Context, max_iterations: int | None) -> None:
     """Launch RD-Agent Qlib scenario."""
-    from src.runner.qlib_runner import collect_factors, run_rdagent
+    from src.runner.qlib_runner import (
+        _append_run_event,
+        _format_run_metadata,
+        _write_run_artifacts_index,
+        collect_factors,
+        run_rdagent,
+    )
 
     config = ctx.obj["config"]
 
@@ -94,17 +135,97 @@ def run(ctx: click.Context, max_iterations: int | None) -> None:
         config.rdagent.max_iterations = max_iterations
         logger.info("Overriding max_iterations to {}", max_iterations)
 
+    start_time, run_id, workspace_dir, archive_paths, stream_counts = _prepare_run_context(config)
+    factors_path = None
+    run_error = None
+    return_code = 0
+
     logger.info(
         "Launching RD-Agent (max_iterations={})...", config.rdagent.max_iterations
     )
-    workspace_dir = run_rdagent(config)
+    try:
+        workspace_dir = run_rdagent(
+            config,
+            workspace_dir=workspace_dir,
+            run_id=run_id,
+            archive_paths=archive_paths,
+            stream_counts=stream_counts,
+        )
 
-    logger.info("Collecting discovered factors from workspace...")
-    factors_path = collect_factors(str(workspace_dir), config=config)
-    if factors_path:
-        logger.info("Factors collected: {}", factors_path)
-    else:
-        logger.warning("No factors discovered in this run")
+        logger.info("Collecting discovered factors from workspace...")
+        _append_run_event(
+            archive_paths,
+            level="INFO",
+            event="factor_collection_started",
+            run_id=run_id,
+            workspace_dir=str(workspace_dir),
+            step="factor_collection",
+            message="Collecting factors from workspace",
+        )
+        factors_path = collect_factors(str(workspace_dir), config=config)
+        _append_run_event(
+            archive_paths,
+            level="INFO",
+            event="factor_collection_completed",
+            run_id=run_id,
+            workspace_dir=str(workspace_dir),
+            step="factor_collection",
+            message="Factor collection completed",
+            data={"factors_path": factors_path},
+        )
+        if factors_path:
+            logger.info("Factors collected: {}", factors_path)
+        else:
+            logger.warning("No factors discovered in this run")
+    except Exception as exc:
+        run_error = exc
+        return_code = 1
+        logger.exception("RD-Agent run failed: {}", exc)
+        _append_run_event(
+            archive_paths,
+            level="ERROR",
+            event="run_failed",
+            run_id=run_id,
+            workspace_dir=str(workspace_dir),
+            step="run",
+            message="RD-Agent run command failed",
+            data={"error": str(exc)},
+        )
+        factors_path = collect_factors(str(workspace_dir), config=config)
+    finally:
+        end_time = datetime.utcnow()
+        if run_error is None:
+            _append_run_event(
+                archive_paths,
+                level="INFO",
+                event="run_completed",
+                run_id=run_id,
+                workspace_dir=str(workspace_dir),
+                step="run",
+                message="RD-Agent run command completed",
+                data={"factors_path": factors_path},
+            )
+        _write_run_artifacts_index(
+            workspace_dir=workspace_dir,
+            run_id=run_id,
+            archive_paths=archive_paths,
+        )
+        run_metadata = _format_run_metadata(
+            config=config,
+            start_time=start_time,
+            end_time=end_time,
+            return_code=return_code,
+            workspace_dir=str(workspace_dir),
+            factors_path=factors_path,
+            run_id=run_id,
+            archive_paths=archive_paths,
+            stream_counts=stream_counts,
+            log_capture_complete=True,
+        )
+        _write_json_file(archive_paths["metadata"], run_metadata)
+
+    if run_error is not None:
+        raise run_error
 
 
 @cli.command()
@@ -117,9 +238,7 @@ def run(ctx: click.Context, max_iterations: int | None) -> None:
 @click.pass_context
 def upload(ctx: click.Context, factors_path: str | None) -> None:
     """Upload discovered factors to Dropbox."""
-    from pathlib import Path
-
-    from src.bridge.dropbox_sync import upload_factors
+    from src.bridge.dropbox_sync import upload_factors, upload_run_archive, upload_run_log
 
     config = ctx.obj["config"]
 
@@ -142,6 +261,14 @@ def upload(ctx: click.Context, factors_path: str | None) -> None:
         sys.exit(1)
 
     upload_factors(config, factors_path)
+    archive_dir = Path(factors_path).resolve().parent
+    run_metadata_path = archive_dir / "run_metadata.json"
+    if run_metadata_path.exists():
+        run_metadata = json.loads(run_metadata_path.read_text(encoding="utf-8"))
+        run_id = run_metadata.get("run_id")
+        if run_id:
+            upload_run_archive(config, archive_dir, run_id)
+            upload_run_log(config, run_metadata)
     logger.info("Upload complete")
 
 
@@ -158,80 +285,195 @@ def upload(ctx: click.Context, factors_path: str | None) -> None:
 @click.pass_context
 def full(ctx: click.Context, max_iterations: int | None, skip_sync: bool) -> None:
     """Run complete pipeline: sync → run → upload."""
-    from pathlib import Path
+    import shutil
 
-    from src.bridge.dropbox_sync import upload_factors, upload_run_log
-    from src.runner.qlib_runner import collect_factors, run_rdagent
+    from src.bridge.dropbox_sync import (
+        download_shared_data,
+        upload_factors,
+        upload_run_archive,
+        upload_run_log,
+    )
+    from src.runner.qlib_runner import (
+        _append_run_event,
+        _format_run_metadata,
+        _write_run_artifacts_index,
+        collect_factors,
+        run_rdagent,
+    )
 
     config = ctx.obj["config"]
-    start_time = datetime.now()
+    start_time, run_id, workspace_dir, archive_paths, stream_counts = _prepare_run_context(config)
+    factors_path = None
+    run_error = None
+    return_code = 0
 
     # ------------------------------------------------------------------
     # Step 1: Sync
     # ------------------------------------------------------------------
-    if not skip_sync:
-        from src.bridge.dropbox_sync import download_shared_data
+    try:
+        if not skip_sync:
+            logger.info("[1/3] Downloading shared data from Dropbox...")
+            _append_run_event(
+                archive_paths,
+                level="INFO",
+                event="sync_started",
+                run_id=run_id,
+                workspace_dir=str(workspace_dir),
+                step="sync",
+                message="Downloading shared data from Dropbox",
+            )
+            download_shared_data(config)
+            _append_run_event(
+                archive_paths,
+                level="INFO",
+                event="sync_completed",
+                run_id=run_id,
+                workspace_dir=str(workspace_dir),
+                step="sync",
+                message="Shared data download completed",
+            )
+        else:
+            logger.info("[1/3] Skipping sync (--skip-sync)")
+            _append_run_event(
+                archive_paths,
+                level="INFO",
+                event="sync_skipped",
+                run_id=run_id,
+                workspace_dir=str(workspace_dir),
+                step="sync",
+                message="Skipped shared data download",
+            )
 
-        logger.info("[1/3] Downloading shared data from Dropbox...")
-        download_shared_data(config)
-    else:
-        logger.info("[1/3] Skipping sync (--skip-sync)")
+        # ------------------------------------------------------------------
+        # Step 2: Run RD-Agent
+        # ------------------------------------------------------------------
+        if max_iterations is not None:
+            config.rdagent.max_iterations = max_iterations
 
-    # ------------------------------------------------------------------
-    # Step 2: Run RD-Agent
-    # ------------------------------------------------------------------
-    if max_iterations is not None:
-        config.rdagent.max_iterations = max_iterations
+        logger.info(
+            "[2/3] Launching RD-Agent (max_iterations={})...", config.rdagent.max_iterations
+        )
+        workspace_dir = run_rdagent(
+            config,
+            workspace_dir=workspace_dir,
+            run_id=run_id,
+            archive_paths=archive_paths,
+            stream_counts=stream_counts,
+        )
 
-    logger.info(
-        "[2/3] Launching RD-Agent (max_iterations={})...", config.rdagent.max_iterations
-    )
-    workspace_dir = run_rdagent(config)
-
-    logger.info("Collecting discovered factors...")
-    factors_path = collect_factors(str(workspace_dir), config=config)
+        logger.info("Collecting discovered factors...")
+        _append_run_event(
+            archive_paths,
+            level="INFO",
+            event="factor_collection_started",
+            run_id=run_id,
+            workspace_dir=str(workspace_dir),
+            step="factor_collection",
+            message="Collecting discovered factors from workspace",
+        )
+        factors_path = collect_factors(str(workspace_dir), config=config)
+        _append_run_event(
+            archive_paths,
+            level="INFO",
+            event="factor_collection_completed",
+            run_id=run_id,
+            workspace_dir=str(workspace_dir),
+            step="factor_collection",
+            message="Factor collection completed",
+            data={"factors_path": factors_path},
+        )
+    except Exception as exc:
+        run_error = exc
+        return_code = 1
+        logger.exception("Full pipeline failed: {}", exc)
+        _append_run_event(
+            archive_paths,
+            level="ERROR",
+            event="run_failed",
+            run_id=run_id,
+            workspace_dir=str(workspace_dir),
+            step="run",
+            message="Full pipeline failed",
+            data={"error": str(exc)},
+        )
+        factors_path = collect_factors(str(workspace_dir), config=config)
 
     # ------------------------------------------------------------------
     # Step 3: Upload results
     # ------------------------------------------------------------------
-    end_time = datetime.now()
-    status = "success" if factors_path else "no_factors"
-
     if factors_path:
         logger.info("[3/3] Uploading discovered factors to Dropbox...")
+        _append_run_event(
+            archive_paths,
+            level="INFO",
+            event="factor_upload_started",
+            run_id=run_id,
+            workspace_dir=str(workspace_dir),
+            step="upload",
+            message="Uploading factor artifacts to Dropbox",
+        )
         upload_factors(config, factors_path)
 
-        # Also copy to local factors dir for reference
         local_factors_dir = Path(config.dropbox.local_factors_dir)
         local_factors_dir.mkdir(parents=True, exist_ok=True)
-        import shutil
-
         shutil.copy2(factors_path, local_factors_dir / "discovered_factors.yaml")
         logger.info("Factors copied to {}", local_factors_dir)
     else:
         logger.warning("[3/3] No factors to upload")
 
-    # Upload run metadata
-    run_metadata = {
-        "start_time": start_time.isoformat(),
-        "end_time": end_time.isoformat(),
-        "duration_seconds": (end_time - start_time).total_seconds(),
-        "status": status,
-        "max_iterations": config.rdagent.max_iterations,
-        "chat_model": config.llm.chat_model,
-        "embedding_model": config.llm.embedding_model,
-        "factors_discovered": factors_path is not None,
-        "workspace_dir": str(workspace_dir),
-    }
+    end_time = datetime.utcnow()
+    if run_error is None:
+        _append_run_event(
+            archive_paths,
+            level="INFO",
+            event="run_completed",
+            run_id=run_id,
+            workspace_dir=str(workspace_dir),
+            step="run",
+            message="Full pipeline completed before Dropbox archival",
+            data={"factors_path": factors_path},
+        )
+    run_metadata = _format_run_metadata(
+        config=config,
+        start_time=start_time,
+        end_time=end_time,
+        return_code=return_code,
+        workspace_dir=str(workspace_dir),
+        factors_path=factors_path,
+        run_id=run_id,
+        archive_paths=archive_paths,
+        stream_counts=stream_counts,
+        log_capture_complete=True,
+    )
+    _write_run_artifacts_index(
+        workspace_dir=workspace_dir,
+        run_id=run_id,
+        archive_paths=archive_paths,
+    )
+    _write_json_file(archive_paths["metadata"], run_metadata)
+    _append_run_event(
+        archive_paths,
+        level="INFO",
+        event="dropbox_upload_started",
+        run_id=run_id,
+        workspace_dir=str(workspace_dir),
+        step="upload",
+        message="Uploading immutable run archive to Dropbox",
+        data={"has_factors": bool(factors_path)},
+    )
+    upload_run_archive(config, workspace_dir, run_id)
     upload_run_log(config, run_metadata)
 
     duration = (end_time - start_time).total_seconds()
     logger.info(
         "Pipeline complete in {:.0f}s — status: {}, factors: {}",
         duration,
-        status,
+        run_metadata["status"],
         factors_path or "none",
     )
+
+    if run_error is not None:
+        raise run_error
 
 
 def main() -> None:
