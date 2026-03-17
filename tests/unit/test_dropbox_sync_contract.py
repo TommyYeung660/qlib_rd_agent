@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.bridge.dropbox_sync import upload_factors, upload_run_archive
+from src.bridge.dropbox_sync import (
+    check_remote_data_freshness,
+    upload_factors,
+    upload_run_archive,
+)
 from src.config import AppConfig, DropboxConfig
 
 
@@ -87,3 +91,38 @@ def test_upload_run_archive_uploads_timestamped_run_batch(monkeypatch, tmp_path:
     assert "/qlib_shared/rdagent_outputs/runs/2026-03-17T23-15-30Z/console.raw.log" in remote_paths
     assert "/qlib_shared/rdagent_outputs/runs/2026-03-17T23-15-30Z/stdout.raw.log" in remote_paths
     assert "/qlib_shared/rdagent_outputs/runs/2026-03-17T23-15-30Z/stderr.raw.log" in remote_paths
+
+
+def test_check_remote_data_freshness_accepts_utc_z_suffix(monkeypatch, tmp_path: Path) -> None:
+    local_dir = tmp_path / "shared_import"
+    workspace_dir = tmp_path / "workspace"
+    local_dir.mkdir()
+    workspace_dir.mkdir()
+
+    (local_dir / "manifest.json").write_text(
+        json.dumps({"exported_at": "2026-02-10T09:00:24.617451Z"}),
+        encoding="utf-8",
+    )
+
+    class _FakeManifestClient:
+        def download_file(self, dropbox_path: str, local_path: Path) -> bool:
+            local_path.write_text(
+                json.dumps({"exported_at": "2026-02-10T09:00:25.617451Z"}),
+                encoding="utf-8",
+            )
+            return True
+
+    monkeypatch.setattr(
+        "src.bridge.dropbox_sync._create_dropbox_client",
+        lambda config: _FakeManifestClient(),
+    )
+
+    config = AppConfig(
+        dropbox=DropboxConfig(local_download_dir=str(local_dir)),
+    )
+    config.rdagent.workspace_dir = str(workspace_dir)
+
+    remote_manifest = check_remote_data_freshness(config)
+
+    assert remote_manifest is not None
+    assert remote_manifest["exported_at"] == "2026-02-10T09:00:25.617451Z"

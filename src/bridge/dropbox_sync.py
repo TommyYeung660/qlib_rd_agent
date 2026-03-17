@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import shutil
 import zipfile
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -74,6 +74,18 @@ def _read_manifest(manifest_path: Path) -> Dict[str, Any]:
         manifest = json.load(f)
 
     return manifest
+
+
+def _parse_manifest_timestamp(timestamp: str) -> datetime:
+    """Parse manifest timestamps into comparable UTC-aware datetimes."""
+    normalized = timestamp.strip()
+    if normalized.endswith("Z"):
+        normalized = "{}+00:00".format(normalized[:-1])
+
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _log_manifest_summary(manifest: Dict[str, Any]) -> None:
@@ -349,8 +361,8 @@ def check_remote_data_freshness(config: AppConfig) -> Optional[Dict[str, Any]]:
         return remote_manifest
 
     try:
-        local_ts = datetime.fromisoformat(local_exported_at_str)
-        remote_ts = datetime.fromisoformat(remote_exported_at_str)
+        local_ts = _parse_manifest_timestamp(local_exported_at_str)
+        remote_ts = _parse_manifest_timestamp(remote_exported_at_str)
     except ValueError as exc:
         logger.error("Failed to parse 'exported_at' timestamps: {}", exc)
         return None
