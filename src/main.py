@@ -100,7 +100,7 @@ def run(ctx: click.Context, max_iterations: int | None) -> None:
     workspace_dir = run_rdagent(config)
 
     logger.info("Collecting discovered factors from workspace...")
-    factors_path = collect_factors(str(workspace_dir))
+    factors_path = collect_factors(str(workspace_dir), config=config)
     if factors_path:
         logger.info("Factors collected: {}", factors_path)
     else:
@@ -189,7 +189,7 @@ def full(ctx: click.Context, max_iterations: int | None, skip_sync: bool) -> Non
     workspace_dir = run_rdagent(config)
 
     logger.info("Collecting discovered factors...")
-    factors_path = collect_factors(str(workspace_dir))
+    factors_path = collect_factors(str(workspace_dir), config=config)
 
     # ------------------------------------------------------------------
     # Step 3: Upload results

@@ -39,3 +39,41 @@ python -m src.main full
 | `python -m src.main run` | Run RD-Agent factor mining |
 | `python -m src.main upload` | Upload discovered factors to Dropbox |
 | `python -m src.main full` | sync → run → upload (all-in-one) |
+
+## Factor artifacts
+
+Each successful factor collection now emits three artifacts in the RD-Agent workspace:
+
+- `discovered_factors.yaml`
+  - legacy compatibility artifact
+  - kept for existing scripts and older consumers
+- `candidate_factors.yaml`
+  - canonical scanner-facing candidate artifact
+  - intended for `qlib_market_scanner` candidate ingestion
+- `factor_manifest.json`
+  - metadata sidecar with run provenance, factor count, and model settings
+
+Dropbox upload publishes all three artifacts under:
+
+- `/qlib_shared/rdagent_outputs/factors/discovered_factors.yaml`
+- `/qlib_shared/rdagent_outputs/factors/candidate_factors.yaml`
+- `/qlib_shared/rdagent_outputs/factors/factor_manifest.json`
+
+This keeps the old `discovered_factors.yaml` path stable while giving the scanner an explicit `candidate`-stage contract to promote locally.
+
+## End-to-end hand-off
+
+For `v1.5.0`, this repo is only the upstream candidate generator in the FX factor loop.
+
+Recommended operating sequence:
+
+1. `qlib_market_scanner` publishes the latest FX `1d` shared bundle with `python -m src.main --profile fx --interval 1d --share-data`
+2. `qlib_rd_agent` runs `python -m src.main full` on the GPU / WSL2 machine and uploads factor artifacts to Dropbox
+3. `qlib_market_scanner` pulls the new batch with `python -m src.main --profile fx --interval 1d --sync-rdagent-factors --enable-rdagent-factors`
+
+Important boundaries:
+
+- this repo does not decide promotion
+- this repo does not write directly into the scanner feature set
+- the scanner remains the final safety gate
+- the official `v1.5.0` FX cadence remains `1d`

@@ -23,6 +23,25 @@ def _create_dropbox_client(config: AppConfig) -> DropboxClient:
     )
 
 
+def _resolve_factor_artifacts(factors_yaml_path: str) -> Dict[str, Path]:
+    local_path = Path(factors_yaml_path)
+    if local_path.name == "candidate_factors.yaml":
+        base_dir = local_path.parent
+        candidate_path = local_path
+        discovered_path = base_dir / "discovered_factors.yaml"
+    else:
+        base_dir = local_path.parent
+        discovered_path = local_path
+        candidate_path = base_dir / "candidate_factors.yaml"
+
+    manifest_path = base_dir / "factor_manifest.json"
+    return {
+        "discovered": discovered_path,
+        "candidate": candidate_path,
+        "manifest": manifest_path,
+    }
+
+
 def _read_manifest(manifest_path: Path) -> Dict[str, Any]:
     """Read and parse a manifest.json file.
 
@@ -143,17 +162,39 @@ def upload_factors(config: AppConfig, factors_yaml_path: str) -> None:
     Raises:
         FileNotFoundError: If factors_yaml_path does not exist.
     """
-    local_path = Path(factors_yaml_path)
+    artifacts = _resolve_factor_artifacts(factors_yaml_path)
+    local_path = artifacts["discovered"]
     if not local_path.exists():
         raise FileNotFoundError("Factors YAML file not found: {}".format(local_path))
 
     client = _create_dropbox_client(config)
 
-    remote_path = "{}/factors/discovered_factors.yaml".format(
+    remote_base = "{}/factors".format(
         config.dropbox.remote_rdagent_folder
     )
+    remote_path = "{}/discovered_factors.yaml".format(remote_base)
     logger.info("Uploading factors YAML ({}) to Dropbox: {}", local_path, remote_path)
     client.upload_file(local_path, remote_path)
+
+    candidate_path = artifacts["candidate"]
+    if candidate_path.exists():
+        candidate_remote_path = "{}/candidate_factors.yaml".format(remote_base)
+        logger.info(
+            "Uploading candidate factors YAML ({}) to Dropbox: {}",
+            candidate_path,
+            candidate_remote_path,
+        )
+        client.upload_file(candidate_path, candidate_remote_path)
+
+    manifest_path = artifacts["manifest"]
+    if manifest_path.exists():
+        manifest_remote_path = "{}/factor_manifest.json".format(remote_base)
+        logger.info(
+            "Uploading factor manifest ({}) to Dropbox: {}",
+            manifest_path,
+            manifest_remote_path,
+        )
+        client.upload_file(manifest_path, manifest_remote_path)
 
     logger.info("Uploaded factors to Dropbox: {}", remote_path)
 

@@ -442,13 +442,13 @@ def run_rdagent(config: AppConfig) -> Path:
     factors_path: Optional[str] = None
     if return_code == 0:
         logger.info("RD-Agent completed successfully (exit code 0)")
-        factors_path = collect_factors(str(workspace_dir))
+        factors_path = collect_factors(str(workspace_dir), config=config)
     else:
         logger.error(
             "RD-Agent exited with code {}. Attempting partial factor collection.",
             return_code,
         )
-        factors_path = collect_factors(str(workspace_dir))
+        factors_path = collect_factors(str(workspace_dir), config=config)
 
     # --- Step 7: metadata ---
     metadata = _format_run_metadata(
@@ -471,7 +471,60 @@ def run_rdagent(config: AppConfig) -> Path:
     return workspace_dir
 
 
-def collect_factors(workspace_dir: str) -> Optional[str]:
+def _build_factor_manifest(
+    *,
+    workspace_dir: Path,
+    factor_count: int,
+    config: AppConfig | None = None,
+) -> Dict[str, Any]:
+    return {
+        "stage": "candidate",
+        "generator": "qlib_rd_agent",
+        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "workspace_dir": str(workspace_dir.resolve()),
+        "factor_count": int(factor_count),
+        "legacy_artifact": "discovered_factors.yaml",
+        "candidate_artifact": "candidate_factors.yaml",
+        "chat_model": config.llm.chat_model if config is not None else "",
+        "embedding_model": config.llm.embedding_model if config is not None else "",
+        "max_iterations": config.rdagent.max_iterations if config is not None else None,
+    }
+
+
+def _write_factor_artifacts(
+    *,
+    workspace_dir: Path,
+    factors: List[Dict[str, Any]],
+    config: AppConfig | None = None,
+) -> str:
+    output_data = {"factors": factors}
+
+    discovered_path = workspace_dir / "discovered_factors.yaml"
+    candidate_path = workspace_dir / "candidate_factors.yaml"
+    manifest_path = workspace_dir / "factor_manifest.json"
+
+    dumped = yaml.dump(output_data, default_flow_style=False, sort_keys=False)
+    discovered_path.write_text(dumped, encoding="utf-8")
+    candidate_path.write_text(dumped, encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps(
+            _build_factor_manifest(
+                workspace_dir=workspace_dir,
+                factor_count=len(factors),
+                config=config,
+            ),
+            indent=2,
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    logger.info("Wrote {} discovered factors to {}", len(factors), discovered_path)
+    logger.info("Wrote candidate factor artifact to {}", candidate_path)
+    logger.info("Wrote factor manifest to {}", manifest_path)
+    return str(discovered_path)
+
+
+def collect_factors(workspace_dir: str, config: AppConfig | None = None) -> Optional[str]:
     """Collect discovered factors from an RD-Agent workspace and write ``discovered_factors.yaml``.
 
     RD-Agent's Qlib scenario produces factor implementation code inside its
@@ -539,15 +592,11 @@ def collect_factors(workspace_dir: str) -> Optional[str]:
         logger.warning("No factors discovered in workspace {}", workspace_dir)
         return None
 
-    # Write YAML
-    output_path = ws / "discovered_factors.yaml"
-    output_data = {"factors": unique_factors}
-    output_path.write_text(
-        yaml.dump(output_data, default_flow_style=False, sort_keys=False),
-        encoding="utf-8",
+    return _write_factor_artifacts(
+        workspace_dir=ws,
+        factors=unique_factors,
+        config=config,
     )
-    logger.info("Wrote {} discovered factors to {}", len(unique_factors), output_path)
-    return str(output_path)
 
 
 def _extract_factors_from_json(data: object, source: str) -> List[Dict[str, Any]]:
